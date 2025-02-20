@@ -1,0 +1,119 @@
+name: Release Alejandra
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  nix-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux
+            runner: ubuntu-24.04
+          # build links against /nix/store/*/lib/libiconv.2.dylib
+          # - id: darwin-x86_64
+          #   runner: macos-13
+          # - id: darwin-aarch64
+          #   runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+
+      - name: Build
+        run: |
+          nix build --print-build-logs .#alejandra-binaries
+
+      - name: Inspect binaries
+        run: |
+          ls -l result/
+          ldd result/* || true
+          otool -l result/* || true
+
+      - name: Upload binaries to workflow artifacts
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-${{ matrix.id }}
+          path: result/*
+          retention-days: 5
+
+      - name: Upload binaries to release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload
+          --clobber "${{ github.ref_name }}"
+          --repo "${{ github.repository }}"
+          result/*
+
+  macos-build:
+      strategy:
+        fail-fast: false
+        matrix:
+          include:
+            - id: x86_64
+              runner: macos-13
+            - id: aarch64
+              runner: macos-14
+      runs-on: ${{ matrix.runner }}
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v4
+
+        - name: Set up Rust toolchain
+          run: |
+            rustup update stable
+            rustup default stable
+
+        - name: Build
+          env:
+            MACOSX_DEPLOYMENT_TARGET: "11.0"
+            CARGO_PROFILE_RELEASE_STRIP: "symbols"
+            CARGO_PROFILE_RELEASE_LTO: "fat"
+          run: |
+            cargo install --color always --no-track --locked --path ./src/alejandra_cli
+
+        - name: Inspect + rename binaries
+          run: |
+            set -x
+            ls -l target/release/
+            otool -l target/release/alejandra
+            otool -L target/release/alejandra
+            dyld_info target/release/alejandra
+            mkdir -p result
+            mv target/release/alejandra result/alejandra-${{ matrix.id }}-apple-darwin
+
+        - name: Upload binaries to workflow artifacts
+          if: github.event_name == 'pull_request'
+          uses: actions/upload-artifact@v4
+          with:
+            name: ci-artifacts-${{ matrix.id }}
+            path: result/*
+            retention-days: 5
+
+        - name: Upload binaries to release assets
+          if: github.event_name == 'release'
+          env:
+            GH_TOKEN: ${{ github.token }}
+          run: >
+            gh release upload
+            --clobber "${{ github.ref_name }}"
+            --repo "${{ github.repository }}"
+            result/*
